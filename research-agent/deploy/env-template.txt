@@ -1,0 +1,18 @@
+# /opt/beget/n8n/.env — добавить эти переменные к существующим
+
+# v6.0.1: обязательные для Research Agent
+YOUTUBE_API_KEY=AIzaSyBC73wykNwa7GJH1SCqVrSFpc-y0aGT8r0
+YANDEX_GPT_API_KEY=<твой ключ из Yandex Cloud>
+YANDEX_GPT_FOLDER_ID=<folder_id из Yandex Cloud>
+
+# v6.0.1: КРИТИЧНО — auth gate. Узнай свой user_id через @userinfobot
+# Если пусто — все /transcribe / /yagpt_summarize вернут 403
+ALLOWED_TELEGRAM_USERS=123456789
+
+# v6.0.1: budget cap (₽/день). 0 = unlimited
+DAILY_BUDGET_RUB=200
+
+# Опционально: перенести сюда из старого .env (если ещё не там)
+# NEWTON_TOKEN=...
+# TELEGRAM_BOT_TOKEN=...
+# KAPITAL_TELEGRAM_BOT_TOKEN=...  # ← СПРОСИ У PM: живой? Если нет — удалить

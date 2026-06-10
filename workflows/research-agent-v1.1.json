@@ -1,0 +1,306 @@
+{
+  "name": "Research Agent v1.1 — YouTube → Digest (auth + chunking)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "trigger_telegram",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "auto",
+      "notes": "v1.1: исправлен тип ноды (telegramTrigger, не telegram) + updates: ['message']. Привязать Telegram credential @ZhukovsFirstBot."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Парсим входящее сообщение + прокидываем user_id в headers для auth gate.\n// Поддерживаем /fetch <url>, /sub <channel>, и просто URL.\nconst msg = $('trigger_telegram').first().json.message;\nconst from = msg.from || {};\nconst user_id = from.id;\nconst chat_id = msg.chat.id;\nconst message_id = msg.message_id;\nconst text = (msg.text || msg.caption || '').trim();\n\nlet cmd = 'noop', url = '', extra = {};\nconst yt = text.match(/(https?:\\/\\/(?:www\\.)?(?:youtube\\.com\\/(?:watch\\?v=|shorts\\/|embed\\/)|youtu\\.be\\/)[0-9A-Za-z_-]{11}[^\\s]*)/i);\nconst pipedUrl = text.match(/(https?:\\/\\/piped\\.video\\/[0-9A-Za-z_-]{11})/i);\n\nif (text.startsWith('/fetch') || yt || pipedUrl) {\n  cmd = 'fetch';\n  url = (yt && yt[1]) || (pipedUrl && pipedUrl[1]) || text.replace(/^\\/fetch\\s*/i, '').trim();\n} else if (text.startsWith('/start') || text.startsWith('/help')) {\n  cmd = 'help';\n}\n\nreturn [{ json: {\n  user_id, chat_id, message_id, cmd, url, raw: text,\n  ts: new Date().toISOString(),\n} }];\n"
+      },
+      "id": "code_parse",
+      "name": "Code — Parse Command + user_id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {"caseSensitive": true, "typeValidation": "strict"},
+          "conditions": [{
+            "id": "c1",
+            "leftValue": "={{ $json.cmd }}",
+            "rightValue": "fetch",
+            "operator": {"type": "string", "operation": "equals", "singleValue": true}
+          }]
+        }
+      },
+      "id": "if_fetch",
+      "name": "IF cmd == fetch",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/youtube_meta",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $('code_parse').first().json.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { url: $('code_parse').first().json.url } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "http_meta",
+      "name": "HTTP /youtube_meta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/youtube_subs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $('code_parse').first().json.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { url: $('code_parse').first().json.url, lang: 'ru' } }}",
+        "options": {"timeout": 60000}
+      },
+      "id": "http_subs",
+      "name": "HTTP /youtube_subs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [900, 380]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Собираем payload для YandexGPT. v1.1: подгружаем user_profile из KB.\n// Если /youtube_subs упал — идём в error-branch.\nconst meta = $('http_meta').first().json;\nconst subs = $('http_subs').first().json;\nconst ctx = $('code_parse').first().json;\n\nif (subs.error) {\n  return [{ json: { error_branch: true, error: subs.error,\n                     hint: subs.hint || subs.last_err || 'см. логи Flask' } }];\n}\n// (опционально) HTTP-запрос к /user_profile через Code нельзя —\n// делаем POST через следующий HTTP-узел. Здесь — только контекст.\nconst user_profile_summary = {\n  markets: 'MOEX, СПБ Биржа',\n  style: 'долгосрочный портфельный',\n  tax_form: 'уточнить у PM: ИП/самозанятый/физлицо',\n  horizon: '1-3 года',\n};\nconst system = `Ты — персональный аналитик. Профиль пользователя: ${JSON.stringify(user_profile_summary)}.\\n` +\n  'Сделай по транскрипту: (1) summary 5 буллетов, (2) 3 action items, релевантные профилю.\\n' +\n  'Верни СТРОГО JSON: {\"summary\":[\"...\"],\"actions\":[{\"text\":\"...\",\"subject\":\"...\",\"trigger\":\"...\",\"confidence\":0.0-1.0}]}';\n\nreturn [{ json: {\n  ctx, // прокинем весь ctx (user_id, chat_id, message_id)\n  video_id: meta.video_id || subs.video_id || '',\n  url: ctx.url,\n  title: meta.title || (subs.meta && subs.meta.title) || 'Без названия',\n  channel: meta.channel || (subs.meta && subs.meta.uploader) || '',\n  duration_sec: meta.duration_sec || (subs.meta && subs.meta.duration) || 0,\n  published: meta.published || (subs.meta && subs.meta.uploadDate) || '',\n  description: meta.description || (subs.meta && subs.meta.description) || '',\n  subs_text: subs.text || '',\n  subs_truncated: subs.truncated || false,\n  subs_char_count: subs.char_count || 0,\n  subs_lang: subs.lang || '?',\n  system,\n} }];\n"
+      },
+      "id": "code_build",
+      "name": "Code — Build YandexGPT payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/yagpt_summarize",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $('code_parse').first().json.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: $('code_build').first().json.subs_text, system: $('code_build').first().json.system, model: 'yandexgpt-lite', max_tokens: 2000, temperature: 0.3 } }}",
+        "options": {"timeout": 120000}
+      },
+      "id": "http_yagpt",
+      "name": "HTTP /yagpt_summarize (chunking внутри)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const yt = $('http_yagpt').first().json;\nconst ctx = $('code_build').first().json;\nlet summary = [];\nlet actions = [];\nif (yt.parsed && yt.parsed.summary) summary = yt.parsed.summary;\nif (yt.parsed && yt.parsed.actions) actions = yt.parsed.actions;\nif (!summary.length && yt.raw) summary = [yt.raw.slice(0, 500)];\nconst claims = (ctx.subs_text || '').split('\\n')\n  .map(s => s.trim())\n  .filter(s => s.length > 20 && s.length < 400)\n  .slice(0, 30)\n  .map(text => ({ text, ts_in_video: null, claim_type: 'transcript_chunk' }));\nreturn [{ json: {\n  ctx,\n  video_id: ctx.video_id,\n  url: ctx.url,\n  title: ctx.title,\n  meta: {\n    'Канал': ctx.channel,\n    'Длительность (сек)': ctx.duration_sec,\n    'Дата публикации': ctx.published || 'н/д',\n    'Язык субтитров': ctx.subs_lang,\n    'Длина субтитров (симв)': ctx.subs_char_count,\n    'YouTube': ctx.url,\n  },\n  summary, actions, claims,\n  digest_id: ctx.video_id || ('d_' + Date.now()),\n  cost: yt.usage || {},\n  chunks: yt.chunks || 1,\n  truncated: yt.truncated || false,\n} }];\n"
+      },
+      "id": "code_digest",
+      "name": "Code — Build Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/render_digest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $('code_parse').first().json.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { title: $('code_digest').first().json.title, summary: $('code_digest').first().json.summary, actions: $('code_digest').first().json.actions, meta: $('code_digest').first().json.meta, claims: $('code_digest').first().json.claims, digest_id: $('code_digest').first().json.digest_id } }}",
+        "options": {"timeout": 15000}
+      },
+      "id": "http_render",
+      "name": "HTTP /render_digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/kb_save",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $('code_parse').first().json.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { kind: 'youtube_video', url: $('code_digest').first().json.url, title: $('code_digest').first().json.title, external_id: $('code_digest').first().json.video_id, claims: $('code_digest').first().json.claims } }}",
+        "options": {"timeout": 15000}
+      },
+      "id": "http_kb",
+      "name": "HTTP /kb_save",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1780, 360]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/send_document",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $('code_parse').first().json.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { file_path: $('http_render').first().json.file_path, chat_id: $('code_parse').first().json.chat_id, message_id: $('code_parse').first().json.message_id, caption: 'Дайджест: ' + $('code_digest').first().json.title } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "http_send_doc",
+      "name": "HTTP /send_document",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/send_message",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $('code_parse').first().json.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { chat_id: $('code_parse').first().json.chat_id, message_id: $('code_parse').first().json.message_id, text: '✅ Готово! 5 буллетов, ' + $('code_digest').first().json.actions.length + ' action items.\\n\\n📺 ' + $('code_digest').first().json.title + '\\n🔗 ' + $('code_digest').first().json.url + '\\n\\n💰 Стоимость: ~' + ($('code_digest').first().json.cost.rub || 0) + '₽ · Чанков: ' + $('code_digest').first().json.chunks } }}",
+        "options": {"timeout": 15000}
+      },
+      "id": "http_send_msg",
+      "name": "HTTP /send_message (TL;DR)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2000, 360]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/send_message",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "X-Telegram-User-Id", "value": "={{ $json.ctx.user_id }}"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { chat_id: $json.ctx.chat_id, message_id: $json.ctx.message_id, text: '❌ Не удалось получить субтитры.\\n\\nВозможные причины:\\n— видео без авто-субтитров\\n— все Piped/Invidious-зеркала недоступны\\n— ссылка неверная\\n\\nПопробуй позже или пришли видео голосом (тогда расшифрую через Newton).' } }}",
+        "options": {"timeout": 15000}
+      },
+      "id": "http_error_msg",
+      "name": "HTTP /send_message (error)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1120, 500]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [[{"node": "Code — Parse Command + user_id", "type": "main", "index": 0}]]
+    },
+    "Code — Parse Command + user_id": {
+      "main": [[{"node": "IF cmd == fetch", "type": "main", "index": 0}]]
+    },
+    "IF cmd == fetch": {
+      "main": [
+        [
+          {"node": "HTTP /youtube_meta", "type": "main", "index": 0},
+          {"node": "HTTP /youtube_subs", "type": "main", "index": 0}
+        ],
+        []
+      ]
+    },
+    "HTTP /youtube_meta": {
+      "main": [[{"node": "Code — Build YandexGPT payload", "type": "main", "index": 0}]]
+    },
+    "HTTP /youtube_subs": {
+      "main": [[{"node": "Code — Build YandexGPT payload", "type": "main", "index": 0}]]
+    },
+    "Code — Build YandexGPT payload": {
+      "main": [
+        [
+          {"node": "HTTP /yagpt_summarize (chunking внутри)", "type": "main", "index": 0}
+        ],
+        [
+          {"node": "HTTP /send_message (error)", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "HTTP /yagpt_summarize (chunking внутри)": {
+      "main": [[{"node": "Code — Build Digest", "type": "main", "index": 0}]]
+    },
+    "Code — Build Digest": {
+      "main": [
+        [
+          {"node": "HTTP /render_digest", "type": "main", "index": 0},
+          {"node": "HTTP /kb_save", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "HTTP /render_digest": {
+      "main": [[{"node": "HTTP /send_document", "type": "main", "index": 0}]]
+    },
+    "HTTP /kb_save": {
+      "main": [[{"node": "HTTP /send_message (TL;DR)", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "PLACEHOLDER_SET_TO_YOUR_ERROR_WORKFLOW_ID",
+    "saveExecutionProgress": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "staticData": null,
+  "tags": [{"name": "research"}, {"name": "v1.1"}],
+  "meta": {
+    "description": "Telegram bot → YouTube URL → Piped subs (с backoff) → YandexGPT summary (с chunking) → HTML digest в Telegram + сохранение в SQLite KB. v1.1: добавлен auth gate, chunking, user_id propagation, error workflow hook."
+  }
+}

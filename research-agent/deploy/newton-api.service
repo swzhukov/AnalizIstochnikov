@@ -1,0 +1,26 @@
+[Unit]
+Description=Newton API + Research Agent (v6.0.1)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/beget/n8n/research-agent
+EnvironmentFile=/opt/beget/n8n/.env
+ExecStart=/usr/bin/python3 core/app.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+PIDFile=/run/newton-api.pid
+StandardOutput=append:/opt/beget/n8n/api.log
+StandardError=append:/opt/beget/n8n/api.log
+
+# OOM protection (1.9 GB RAM host)
+MemoryMax=700M
+MemoryHigh=550M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

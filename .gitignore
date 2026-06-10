@@ -1,0 +1,53 @@
+# ============================================================
+# .gitignore для AnalizIstochnikov (Research Agent v6.0.1+)
+# ============================================================
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Runtime (transient файлы на VPS — конкретный путь, чтобы НЕ матчить packages/kb/)
+newton-tmp/
+/opt/beget/n8n/kb/
+*.log
+*.pid
+
+# Секреты (КРИТИЧНО — LESSONS §2.8)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+secrets.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Test artifacts
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
