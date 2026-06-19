@@ -1,3 +1,36 @@
+## v6.0.10 (2026-06-19) — Sprint 9: n8n Code nodes fix
+
+### 🎯 PM feedback
+PM прислал свежий n8n API key. Sprint 8 фиксы в Flask не дошли до workflow — Code-ноды не подтянули user_profile и claims. Sprint 9 дотянул.
+
+### ✨ Что изменилось
+
+**n8n workflow `FRsjN6Ab1FBGAMoM` (13 нод, v78):**
+- ➕ Добавлена нода **HTTP /user_profile** между `HTTP /youtube_subs` и `Code — Build YandexGPT payload`
+- 🔧 `Code — Build YandexGPT payload` v6.0.9: берёт profile из HTTP /user_profile, передаёт user_profile + claims + timeline дальше
+- 🔧 `Code — Build Digest` v6.0.10: берёт claims из Build YandexGPT payload (с ts_in_video), fallback на subs_text.split
+- 🔧 `jsonBody` в HTTP /yagpt_summarize обновлён: добавлены `user_profile` и `timeline`
+- 🔧 Connections: IF → subs → profile → Build YandexGPT (sequential, не parallel — избегаем race condition)
+
+### 📊 Результат (E2E test, видео Uq-3I4Xwj4M — Мрочковский «Сколько должна стоить квартира»)
+
+**Action items v6.0.7 (Sprint 8)**: «Изучить возможности использования корпоративных данных и ИИ в закрытых сетях» (общее)
+
+**Action items v6.0.10 (Sprint 9)**:
+1. «Проверить соотношение стоимости **текущей квартиры Сергея** к его общему капиталу и сравнить с рекомендуемым уровнем»
+2. «Проверить, как транспортная доступность влияет на стоимость недвижимости в районе, где **Сергей планирует покупку жилья**»
+3. «Учесть личные предпочтения и психологический аспект при выборе объекта недвижимости для личного проживания»
+
+**Claims v6.0.7**: 1 длинная строка с дублированными фразами (баг fallback subs_text.split)
+**Claims v6.0.10**: 15 осмысленных тезисов с таймкодами mm:ss:
+- `[00:00]` Сколько должна стоить ваша квартира? Хороший вопрос...
+- `[02:38]` квартиры, ну, нежелательно, чтобы она была слишком уж подавляющей, в идеале там не больше половины...
+- `[06:24]` баланс между финансовой рациональностью. То есть, если мы говорим, допустим, про инвестиционное жильё...
+
+### 📚 Lessons (MISTAKES §3.34-3.36)
+- **§3.34** n8n jsonBody не передаёт поля автоматически — нужно явно перечислить в expression
+- **§3.35** Code-нода не имеет async HTTP — для получения данных из БД нужна отдельная HTTP Request нода
+- **§3.36** Race condition: параллельные HTTP узлы не успевают к моменту чтения — sequential обязательно
 
 
 ## v6.0.7 (2026-06-19) — Sprint 8: prompt + claims + rendering fix
