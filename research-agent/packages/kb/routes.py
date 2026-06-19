@@ -163,11 +163,53 @@ def _render_html(title, summary, actions, meta, claims):
         if trig: actions_html += f'<div class="am">⏰ {_esc(trig)}</div>'
         if conf != '' and conf is not None: actions_html += f'<div class="am">📊 уверенность: {conf}</div>'
         actions_html += '</div>'
+    # v6.0.7: smart claims rendering
+    # 1) merge consecutive cues within 3 sec gap into single sentence
+    # 2) filter len >= 40 chars (real phrases, not fragments)
+    # 3) dedupe by normalized text
+    # 4) sort by ts, take top 30
+    import re as _re
+    def _norm(t):
+        return _re.sub(r'\W+', ' ', t.lower()).strip()
+    def _fmt_ts(ts):
+        h = int(ts // 3600); m = int((ts % 3600) // 60); s = int(ts % 60)
+        return f'{h:02d}:{m:02d}:{s:02d}' if h else f'{m:02d}:{s:02d}'
+
+    merged = []
+    cur_text = ''
+    cur_start = 0
+    last_ts = -100
+    for c in (claims or []):
+        if not isinstance(c, dict): continue
+        t = (c.get('text') or '').strip()
+        ts = c.get('ts_in_video', 0) or 0
+        if not t: continue
+        if ts - last_ts <= 3.0 and cur_text:
+            # extend current
+            cur_text = (cur_text + ' ' + t).strip()
+            last_ts = ts
+        else:
+            # flush
+            if cur_text and len(cur_text) >= 40:
+                merged.append((cur_start, cur_text))
+            cur_start = ts
+            cur_text = t
+            last_ts = ts
+    if cur_text and len(cur_text) >= 40:
+        merged.append((cur_start, cur_text))
+
+    # dedupe by normalized
+    seen = set()
     claims_html = ''
-    for c in (claims or [])[:30]:
-        text = c.get('text', '') if isinstance(c, dict) else str(c)
-        ts = c.get('ts_in_video', '') if isinstance(c, dict) else ''
-        claims_html += f'<div class="claim"><span class="ts">{_esc(str(ts))}s</span> {_esc(text)}</div>'
+    kept = 0
+    for ts, text in merged:
+        n = _norm(text)
+        if n in seen: continue
+        if len(n) < 30: continue
+        seen.add(n)
+        claims_html += f'<div class="claim"><span class="ts">{_fmt_ts(ts)}</span> {_esc(text)}</div>'
+        kept += 1
+        if kept >= 30: break
     meta_html = ''
     for k, v in (meta or {}).items():
         meta_html += f'<div class="meta-row"><b>{_esc(k)}:</b> {_esc(str(v)[:300])}</div>'
@@ -189,7 +231,7 @@ h2{{color:#4a90e2;margin-top:30px}}
 .footer{{margin-top:30px;padding-top:12px;border-top:1px solid #ddd;font-size:12px;color:#999}}
 </style></head><body>
 <h1>{_esc(title)}</h1>
-<div class="footer">Сгенерировано: {now_msk} · Research Agent v6.0.1</div>
+<div class="footer">Сгенерировано: {now_msk} · Research Agent v6.0.7</div>
 <div class="meta">{meta_html}</div>
 <h2>📋 Краткое содержание</h2>
 <div class="summary"><ol>{summary_html}</ol></div>

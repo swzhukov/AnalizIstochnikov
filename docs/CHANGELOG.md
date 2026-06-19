@@ -1,3 +1,57 @@
+
+
+## v6.0.7 (2026-06-19) — Sprint 8: prompt + claims + rendering fix
+
+### 🎯 PM feedback
+PM прислал реальный дайджест через @ZhukovsFirstBot и нашёл 2 бага:
+1. Action items с фейковым профилем ("долгосрочный портфельный инвестор" — placeholder, не реальный PM)
+2. "Ключевые тезисы" — мусор из 30 строк "Коллеги, всем добрый день" повторённых 3 раза, без таймкодов
+
+### ✨ Что изменилось
+
+**`packages/research/utils.py`:**
+- +`vtt_to_claims(vtt)` — парсит VTT → `[{ts_in_video, text}]`, dedup identical
+- +`vtt_to_timeline(vtt)` — формат `[hh:mm:ss] text` для YandexGPT input
+- +v6.0.8 cumulative overlap strip (sliding window 200 chars)
+
+**`packages/research/routes.py`:**
+- `/youtube_subs` возвращает `claims` (массив) + `timeline` (строка) — раньше только `text`
+- `/yagpt_summarize` принимает `user_profile` и вызывает server-side `_build_investor_prompt()`
+- +`_build_investor_prompt(profile)` — жёсткий prompt с ПРОФИЛЕМ PM (watchlist, ОФЗ, ИИС, налоги)
+  - Confidence 0.8-1.0 для инвестиционных видео
+  - Confidence 0.4-0.6 для непрофильных (но actions всё равно привязаны к watchlist)
+
+**`packages/kb/routes.py`:**
+- `_render_html` v6.0.7: smart claims merge
+  - merge consecutive cues within 3 sec gap
+  - filter `len(text) >= 40` chars (real phrases, not fragments)
+  - dedupe by normalized text
+  - format ts as `mm:ss` или `hh:mm:ss`
+  - top 30 by ts order
+- Version: `Research Agent v6.0.7` (footer)
+
+### 📊 Метрики (Sprint 8 test, то же видео https://youtu.be/6Z_hHWStwxw)
+- /youtube_subs: 641 unique claims (из 1272 cues), timeline 12K chars
+- /yagpt_summarize: 4181 input + 447 output tokens, 1.05₽
+- /render_digest: 30 осмысленных claims с таймкодами (vs 30 строк мусора в v6.0.1)
+- HTML size: 21KB (vs 8.7KB в v6.0.1 — больше данных, меньше мусора)
+
+### 🎯 Качество дайджеста (Sprint 8)
+- ✅ Action items про watchlist PM (OFZ-26248, OFZ-26238, PIK, LSR, X5, MGN)
+- ✅ Confidence корректный (0.6 для неинвестиционного видео)
+- ✅ Relevance объясняет, почему это важно для PM
+- ✅ Ключевые тезисы с таймкодами mm:ss (навигация по видео)
+- ✅ Summary 5 буллетов, по существу видео
+
+### 📚 Lessons (MISTAKES §3.30-3.33)
+- **§3.30** Hardcoded user_profile в n8n Code-ноде → server-side builder в Flask
+- **§3.31** VTT auto-transcript cumulative cues → strip overlap (sliding window 200 chars)
+- **§3.32** NoneType guard при `prev_text + ' ' + text`
+- **§3.33** `FLASK_DEBUG=0` всё равно кэширует модули — `rm -rf __pycache__` обязателен
+
+### 🔄 Migration
+- Никаких breaking changes. n8n workflow `FRsjN6Ab1FBGAMoM` остаётся активным.
+- Code — Build YandexGPT payload теперь передаёт `user_profile: {...}` в `/yagpt_summarize`.
 # Changelog
 
 ## v6.0.1 (2026-06-10) — hotfix после council v2

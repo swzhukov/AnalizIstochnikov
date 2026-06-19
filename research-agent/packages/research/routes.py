@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from flask import request, jsonify
 
 from packages.research import config as cfg
-from packages.research.utils import extract_video_id, vtt_to_text, chunk_text, safe_get
+from packages.research.utils import extract_video_id, vtt_to_text, vtt_to_claims, vtt_to_timeline, chunk_text, safe_get
 
 log = logging.getLogger('newton-api.research')
 
@@ -255,7 +255,24 @@ def register(app):
             return jsonify({'error': 'video_id or url required'}), 400
         api_key = os.environ.get('YOUTUBE_API_KEY', '')
         if not api_key:
-            return jsonify({'error': 'YOUTUBE_API_KEY not set'}), 500
+            # v6.0.4 fallback: no API key → return minimal meta (status 200)
+            # so downstream n8n nodes can still proceed with subs only
+            log.warning('YOUTUBE_API_KEY not set, returning minimal meta')
+            return jsonify({
+                'video_id': video_id,
+                'title': None,
+                'channel': None,
+                'channel_id': None,
+                'published': None,
+                'description': None,
+                'tags': [],
+                'duration_sec': 0,
+                'views': 0,
+                'likes': 0,
+                'thumb': None,
+                'url': f'https://youtu.be/{video_id}',
+                'meta_source': 'fallback_no_api_key',
+            })
         try:
             r = requests.get(cfg.YOUTUBE_API_URL,
                              params={'key': api_key, 'part': 'snippet,contentDetails,statistics',
@@ -337,12 +354,16 @@ def register(app):
             _sub_r.raise_for_status()
             raw = _sub_r.text
             text = vtt_to_text(raw)
+            claims = vtt_to_claims(raw)
+            timeline = vtt_to_timeline(raw, max_chars=12000)
             return jsonify({
                 'video_id': video_id,
                 'source': 'yt-dlp',
                 'lang': prefer_lang,
                 'auto_generated': True,
                 'text': text,
+                'claims': claims,
+                'timeline': timeline,
                 'truncated': False,
                 'char_count': len(text),
                 'meta': {
@@ -381,6 +402,7 @@ def register(app):
         model = data.get('model', cfg.YANDEX_GPT_DEFAULT_MODEL)
         max_tokens = int(data.get('max_tokens', 2000))
         temperature = float(data.get('temperature', 0.3))
+        user_profile = data.get('user_profile')  # v6.0.5: optional profile from KB
         if not text:
             return jsonify({'error': 'text required'}), 400
         api_key = os.environ.get('YANDEX_GPT_API_KEY', '')
@@ -388,9 +410,7 @@ def register(app):
         if not api_key or not folder_id:
             return jsonify({'error': 'YANDEX_GPT_API_KEY or YANDEX_GPT_FOLDER_ID not set'}), 500
         if not system:
-            system = ('Ты — персональный аналитик инвестора. Тебе дают транскрипт видео на русском. '
-                      'Сделай: 1) summary 5 буллетов, 2) 3 action items. '
-                      'Вывод строго в JSON: {"summary": [...], "actions": [{"text", "subject", "trigger", "confidence"}]}.')
+            system = _build_investor_prompt(user_profile)
         # v6.0.1: chunking — для длинных видео разбиваем и summarize по частям
         chunks = chunk_text(text, size=cfg.CHUNK_SIZE_CHARS, overlap=cfg.CHUNK_OVERLAP_CHARS)
         truncated = len(text) > cfg.YANDEX_GPT_MAX_INPUT_CHARS
@@ -498,3 +518,76 @@ def _parse_json_safe(s):
             return json.loads(m.group(0))
         except Exception:
             return None
+
+
+# ============================================================
+# _build_investor_prompt (v6.0.5) — server-side prompt construction
+
+def _build_investor_prompt(profile):
+    """v6.0.6: STRONGLY anchor advice in user profile instruments. Even if video is not about
+    investing (e.g. ITSM/AI), actions must be CONCRETE to user's watchlist/ОФЗ/акции/ИИС."""
+    if not profile or not isinstance(profile, dict):
+        return (
+            'Ты персональный аналитик. Сделай 5 summary буллетов и 3 action items, релевантных '
+            'для частного инвестора. Верни JSON: {summary:[5 шт], actions:[3 шт с text/subject/trigger/confidence/relevance]}.'
+        )
+    name = profile.get('name') or 'инвестор'
+    brokers = profile.get('brokers') or []
+    broker = brokers[0] if isinstance(brokers, list) and brokers else (brokers or 'не указан')
+    accounts = profile.get('accounts') or []
+    iis = next((a for a in accounts if isinstance(a, str) and 'ИИС' in a), 'нет ИИС')
+    tax = profile.get('tax_basis') or 'НДФЛ 13%'
+    horizon = profile.get('horizon') or 'не указан'
+    goal = profile.get('goal_amount_rub') or '?'
+    current = profile.get('current_savings_rub') or '?'
+    monthly = profile.get('monthly_savings_rub') or 0
+    instruments = profile.get('preferred_instruments') or []
+    watch = profile.get('watchlist') or []
+    risk = profile.get('risk_tolerance') or 'умеренный'
+    channels = profile.get('favorite_youtube_channels') or []
+
+    watch_str = ', '.join(f"{w.get('ticker','?')} ({w.get('type','?')})" for w in watch[:8] if isinstance(w, dict)) or 'нет watchlist'
+    instr_str = ', '.join(instruments) if isinstance(instruments, list) else str(instruments) or 'не указаны'
+    channels_str = ', '.join(channels) if isinstance(channels, list) else str(channels) or ''
+    channels_line = f'- Любимые блогеры: {channels_str}\n' if channels_str else ''
+    watch_examples = ', '.join(w.get('ticker','?') for w in watch[:4] if isinstance(w, dict)) or 'ОФЗ-26248, PIK, X5'
+
+    return (
+        f'Ты персональный финансовый советник для {name} (частный инвестор, {tax}, '
+        f'брокер {broker}, {iis}).\n\n'
+        f'ПРОФИЛЬ (ИСПОЛЬЗУЙ ЭТО ЖЁСТКО в каждом action):\n'
+        f'- Горизонт: {horizon}, цель: {goal} ₽ (сейчас {current} ₽, пополнение {monthly} ₽/мес)\n'
+        f'- Инструменты: {instr_str}\n'
+        f'- Watchlist: {watch_str}\n'
+        f'- Риск-профиль: {risk}\n'
+        f'{channels_line}\n'
+        f'ТЕБЕ ДАН ТРАНСКРИПТ ВИДЕО. ВИДЕО МОЖЕТ БЫТЬ НЕ ПРО ИНВЕСТИЦИИ.\n\n'
+        f'ЗАДАЧА: 5 буллетов summary + 3 КОНКРЕТНЫХ actions, привязанных к ПОРТФЕЛЮ {name}.\n\n'
+        f'Строгий JSON, БЕЗ markdown:\n'
+        f'{{\n'
+        f'  "summary": [\n'
+        f'    "Тезис 1: главный инсайт видео",\n'
+        f'    "Тезис 2: конкретный факт/цифра",\n'
+        f'    "Тезис 3: практическая рекомендация автора",\n'
+        f'    "Тезис 4: риск/контраргумент",\n'
+        f'    "Тезис 5: связь с трендом/рынком"\n'
+        f'  ],\n'
+        f'  "actions": [\n'
+        f'    {{\n'
+        f'      "text": "КОНКРЕТНОЕ действие для портфеля {name}: что проверить/сравнить",\n'
+        f'      "subject": "что именно делать",\n'
+        f'      "trigger": "когда делать (ДАТА или УСЛОВИЕ)",\n'
+        f'      "confidence": 0.0-1.0,\n'
+        f'      "relevance": "почему релевантно {name} с учётом горизонта/risk/watchlist"\n'
+        f'    }}\n'
+        f'  ]\n'
+        f'}}\n\n'
+        f'⚠️ КРИТИЧНО: даже если видео про ИИ/IT/науку — actions ОБЯЗАНЫ ссылаться на КОНКРЕТНЫЕ '
+        f'инструменты из watchlist/instruments {name} ({watch_examples}) или ИИС-пополнение/налоговый вычет. '
+        f'НЕ выдавай общие советы про "изучить ИИ в бизнесе" — это не про портфель.\n\n'
+        f'ПРАВИЛА:\n'
+        f'- summary: 5 буллетов, 10-25 слов, по существу видео\n'
+        f'- actions: 3 КОНКРЕТНЫХ, упоминают watchlist/instruments/ИИС/налоги {name}\n'
+        f'- confidence: 0.8-1.0 для инвестиционных видео, 0.4-0.6 для непрофильных\n'
+        f'- НИКАКОГО markdown, чистый JSON\n'
+    )

@@ -99,7 +99,7 @@ n8n UI → Workflows → Import from File → `workflows/research-agent-v1.1.jso
 
 | Версия | Статус | Что |
 |--------|--------|-----|
-| **v6.0.1** | ✅ ready | Auth gate, chunking, systemd, split Flask, KB §10.7-10.10 |
+| **v6.0.7** | ✅ ready | Auth gate, chunking, systemd, split Flask, KB §10.7-10.10 |
 | **v6.2** | 📋 planned | Eval harness (20-видео golden set), `/cost_estimate`, proactive monitoring |
 | **v6.3** | 📋 planned | LLM provider abstraction, KB as product |
 
